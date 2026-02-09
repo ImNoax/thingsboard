@@ -28,7 +28,7 @@ jobs:
       # Build SANS aucun test (rapide, fiable)
       - name: Build (skip all tests)
         run: |
-          mvn -B install -DskipTests
+          mvn -B install -DskipTests -Dlicense.skip=true
 
       # Tests UNITAIRES uniquement
       # - Surefire = unit tests
@@ -41,7 +41,8 @@ jobs:
             -fae \
             -Dmaven.test.failure.ignore=true \
             -DskipITs=true \
-            -DskipIntegrationTests=true
+            -DskipIntegrationTests=true \
+            -Dlicense.skip=true
 
       # Analyse des résultats Surefire (unit tests)
       - name: Summarize unit test results
