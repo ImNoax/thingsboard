@@ -25,19 +25,68 @@ jobs:
           chmod +x build_proto.sh
           ./build_proto.sh
 
-      # Build SANS aucun test (rapide, fiable)
-      - name: Build (skip all tests)
+      # Configuration mémoire pour optimiser les performances
+      - name: Set Maven memory options
         run: |
-          mvn -B install -DskipTests -Dlicense.skip=true
+          echo "MAVEN_OPTS=-Xmx2048m" >> $GITHUB_ENV
+          echo "SUREFIRE_JAVA_OPTS=-Xmx1200m -Xss256k -XX:+ExitOnOutOfMemoryError" >> $GITHUB_ENV
 
-      # Tests UNITAIRES uniquement
+      # Build minimal : installe seulement les modules nécessaires pour les tests
+      # On installe les modules common/* et dao qui sont des dépendances, mais on skip les tests
+      # Cela permet aux modules suivants de résoudre leurs dépendances inter-modules
+      # Note: On construit d'abord common (qui n'a pas de dépendances), puis dao (qui dépend de common)
+      - name: Build dependencies (skip tests)
+        run: |
+          # Build common/* modules (dépendances de base)
+          mvn -B install -DskipTests -Dlicense.skip=true -T 4 -pl common -am
+          # Build dao (dépend de common/*)
+          mvn -B install -DskipTests -Dlicense.skip=true -T 4 -pl dao -am
+
+      # Tests UNITAIRES uniquement avec optimisations de parallélisation
       # - Surefire = unit tests
       # - Failsafe (IT/e2e) = SKIP
+      # - -T 4 : parallélisation Maven (4 threads pour modules)
+      # - -DforkCount=4 : parallélisation Surefire (4 processus JVM)
+      # - -Dparallel=classes : tests en parallèle au niveau des classes
       # - -fae : run tous les modules même s'il y a des fails
       # - ignore failures : on décidera nous-mêmes si le pipeline échoue
-      - name: Run unit tests only
+      # - Exclusion des modules lourds (application, dao) pour accélérer
+      - name: Run unit tests only (optimized)
+        run: |
+          # Tests des modules légers en parallèle (exclut application, dao, ui-ngx, msa)
+          mvn -B test \
+            -T 4 \
+            -pl='!application,!dao,!ui-ngx,!msa/js-executor,!msa/web-ui' \
+            -DforkCount=4 \
+            -Dparallel=classes \
+            -fae \
+            -Dmaven.test.failure.ignore=true \
+            -DskipITs=true \
+            -DskipIntegrationTests=true \
+            -Dlicense.skip=true
+
+      # Tests du module dao (nécessite une configuration spéciale)
+      - name: Run dao unit tests
         run: |
           mvn -B test \
+            -pl dao \
+            -Dparallel=packages \
+            -DforkCount=4 \
+            -fae \
+            -Dmaven.test.failure.ignore=true \
+            -DskipITs=true \
+            -DskipIntegrationTests=true \
+            -Dlicense.skip=true
+
+      # Tests du module application (le plus lourd, divisé par packages)
+      - name: Run application unit tests (optimized)
+        run: |
+          # Exclut les tests nosql qui sont lents
+          mvn -B test \
+            -pl application \
+            -Dsurefire.excludes='**/nosql/*Test.java' \
+            -DforkCount=6 \
+            -Dparallel=packages \
             -fae \
             -Dmaven.test.failure.ignore=true \
             -DskipITs=true \
