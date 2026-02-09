@@ -1,0 +1,97 @@
+name: CI - Build & Unit Tests Only
+
+on:
+  push:
+    branches: [ "master" ]
+
+jobs:
+  build-and-unit-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      # Génération des protos (nécessaire pour ThingsBoard)
+      - name: Generate proto sources
+        run: |
+          chmod +x build_proto.sh
+          ./build_proto.sh
+
+      # Build SANS aucun test (rapide, fiable)
+      - name: Build (skip all tests)
+        run: |
+          mvn -B install -DskipTests
+
+      # Tests UNITAIRES uniquement
+      # - Surefire = unit tests
+      # - Failsafe (IT/e2e) = SKIP
+      # - -fae : run tous les modules même s'il y a des fails
+      # - ignore failures : on décidera nous-mêmes si le pipeline échoue
+      - name: Run unit tests only
+        run: |
+          mvn -B test \
+            -fae \
+            -Dmaven.test.failure.ignore=true \
+            -DskipITs=true \
+            -DskipIntegrationTests=true
+
+      # Analyse des résultats Surefire (unit tests)
+      - name: Summarize unit test results
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+
+          total = failures = errors = skipped = 0
+
+          for f in glob.glob("**/target/surefire-reports/TEST-*.xml", recursive=True):
+            root = ET.parse(f).getroot()
+            total += int(root.attrib.get("tests", 0))
+            failures += int(root.attrib.get("failures", 0))
+            errors += int(root.attrib.get("errors", 0))
+            skipped += int(root.attrib.get("skipped", 0))
+
+          passed = total - failures - errors - skipped
+
+          print("Unit test summary")
+          print(f"Total   : {total}")
+          print(f"Passed  : {passed}")
+          print(f"Failed  : {failures}")
+          print(f"Errors  : {errors}")
+          print(f"Skipped : {skipped}")
+
+          with open("counts.env", "w") as f:
+            f.write(f"TOTAL={total}\n")
+            f.write(f"PASSED={passed}\n")
+            f.write(f"FAILURES={failures}\n")
+            f.write(f"ERRORS={errors}\n")
+            f.write(f"SKIPPED={skipped}\n")
+
+          with open("summary.md", "w") as f:
+            f.write("## Unit test results\n")
+            f.write(f"- Total: **{total}**\n")
+            f.write(f"- Passed: **{passed}**\n")
+            f.write(f"- Failures: **{failures}**\n")
+            f.write(f"- Errors: **{errors}**\n")
+            f.write(f"- Skipped: **{skipped}**\n")
+          PY
+
+          cat counts.env >> "$GITHUB_ENV"
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      # Validation finale du pipeline
+      - name: Validate pipeline
+        run: |
+          if [ "$FAILURES" -gt 0 ] || [ "$ERRORS" -gt 0 ]; then
+            echo "❌ Unit tests failed (failures=$FAILURES, errors=$ERRORS)"
+            exit 1
+          fi
+          echo "✅ All unit tests passed"
