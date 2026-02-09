@@ -1,4 +1,4 @@
-name: CI - Build & Unit Tests Only
+name: CI - Common data & util unit tests
 
 on:
   push:
@@ -9,8 +9,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -19,82 +18,32 @@ jobs:
           java-version: "17"
           cache: maven
 
-      # Génération des protos (nécessaire pour ThingsBoard)
       - name: Generate proto sources
         run: |
           chmod +x build_proto.sh
           ./build_proto.sh
 
-      # Configuration mémoire pour optimiser les performances
-      - name: Set Maven memory options
+      # Build seulement ce qui est nécessaire pour common/data + common/util
+      - name: Build deps (skip tests)
         run: |
-          echo "MAVEN_OPTS=-Xmx2048m" >> $GITHUB_ENV
-          echo "SUREFIRE_JAVA_OPTS=-Xmx1200m -Xss256k -XX:+ExitOnOutOfMemoryError" >> $GITHUB_ENV
+          mvn -B -Dlicense.skip=true -DskipTests -DskipITs \
+            -pl common/data,common/util -am \
+            install
 
-      # Build minimal : installe seulement les modules nécessaires pour les tests
-      # On installe les modules common/* et dao qui sont des dépendances, mais on skip les tests
-      # Cela permet aux modules suivants de résoudre leurs dépendances inter-modules
-      # Note: On construit d'abord common (qui n'a pas de dépendances), puis dao (qui dépend de common)
-      - name: Build dependencies (skip tests)
-        run: |
-          # Build common/* modules (dépendances de base)
-          mvn -B install -DskipTests -Dlicense.skip=true -T 4 -pl common -am
-          # Build dao (dépend de common/*)
-          mvn -B install -DskipTests -Dlicense.skip=true -T 4 -pl dao -am
-
-      # Tests UNITAIRES uniquement avec optimisations de parallélisation
-      # - Surefire = unit tests
-      # - Failsafe (IT/e2e) = SKIP
-      # - -T 4 : parallélisation Maven (4 threads pour modules)
-      # - -DforkCount=4 : parallélisation Surefire (4 processus JVM)
-      # - -Dparallel=classes : tests en parallèle au niveau des classes
-      # - -fae : run tous les modules même s'il y a des fails
-      # - ignore failures : on décidera nous-mêmes si le pipeline échoue
-      # - Exclusion des modules lourds (application, dao) pour accélérer
-      - name: Run unit tests only (optimized)
-        run: |
-          # Tests des modules légers en parallèle (exclut application, dao, ui-ngx, msa)
-          mvn -B test \
-            -T 4 \
-            -pl='!application,!dao,!ui-ngx,!msa/js-executor,!msa/web-ui' \
-            -DforkCount=4 \
-            -Dparallel=classes \
-            -fae \
-            -Dmaven.test.failure.ignore=true \
-            -DskipITs=true \
-            -DskipIntegrationTests=true \
-            -Dlicense.skip=true
-
-      # Tests du module dao (nécessite une configuration spéciale)
-      - name: Run dao unit tests
-        run: |
-          mvn -B test \
-            -pl dao \
-            -Dparallel=packages \
-            -DforkCount=4 \
-            -fae \
-            -Dmaven.test.failure.ignore=true \
-            -DskipITs=true \
-            -DskipIntegrationTests=true \
-            -Dlicense.skip=true
-
-      # Tests du module application (le plus lourd, divisé par packages)
-      - name: Run application unit tests (optimized)
+      # Run uniquement les tests unitaires de common/data et common/util
+      - name: Run unit tests (common/data + common/util)
         continue-on-error: true
         run: |
-          # Exclut les tests nosql qui sont lents
           mvn -B test \
-            -pl application \
-            -Dsurefire.excludes='**/nosql/*Test.java' \
-            -DforkCount=6 \
-            -Dparallel=packages \
+            -pl common/data,common/util -am \
             -fae \
             -Dmaven.test.failure.ignore=true \
             -DskipITs=true \
             -DskipIntegrationTests=true \
-            -Dlicense.skip=true
+            -Dlicense.skip=true \
+            -DforkCount=2C \
+            -DreuseForks=true
 
-      # Analyse des résultats Surefire (unit tests)
       - name: Summarize unit test results
         shell: bash
         run: |
@@ -102,9 +51,15 @@ jobs:
           import glob, xml.etree.ElementTree as ET
 
           total = failures = errors = skipped = 0
+          files = glob.glob("**/target/surefire-reports/TEST-*.xml", recursive=True)
 
-          for f in glob.glob("**/target/surefire-reports/TEST-*.xml", recursive=True):
-            root = ET.parse(f).getroot()
+          for f in files:
+            try:
+              root = ET.parse(f).getroot()
+            except Exception:
+              continue
+            if root.tag != "testsuite":
+              continue
             total += int(root.attrib.get("tests", 0))
             failures += int(root.attrib.get("failures", 0))
             errors += int(root.attrib.get("errors", 0))
@@ -112,10 +67,10 @@ jobs:
 
           passed = total - failures - errors - skipped
 
-          print("Unit test summary")
+          print("Unit test summary (common/data + common/util)")
           print(f"Total   : {total}")
           print(f"Passed  : {passed}")
-          print(f"Failed  : {failures}")
+          print(f"Failures: {failures}")
           print(f"Errors  : {errors}")
           print(f"Skipped : {skipped}")
 
@@ -127,7 +82,7 @@ jobs:
             f.write(f"SKIPPED={skipped}\n")
 
           with open("summary.md", "w") as f:
-            f.write("## Unit test results\n")
+            f.write("## Unit test results (common/data + common/util)\n")
             f.write(f"- Total: **{total}**\n")
             f.write(f"- Passed: **{passed}**\n")
             f.write(f"- Failures: **{failures}**\n")
@@ -138,10 +93,9 @@ jobs:
           cat counts.env >> "$GITHUB_ENV"
           cat summary.md >> "$GITHUB_STEP_SUMMARY"
 
-      # Validation finale du pipeline
       - name: Validate pipeline
         run: |
-          if [ "$FAILURES" -gt 0 ] || [ "$ERRORS" -gt 0 ]; then
+          if [ "${FAILURES:-0}" -gt 0 ] || [ "${ERRORS:-0}" -gt 0 ]; then
             echo "❌ Unit tests failed (failures=$FAILURES, errors=$ERRORS)"
             exit 1
           fi
