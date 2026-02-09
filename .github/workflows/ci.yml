@@ -2,7 +2,7 @@ name: CI - Build & Unit Tests Only
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [ "master", "ci" ]
 
 jobs:
   build-and-unit-tests:
